@@ -5,6 +5,8 @@ import (
 	"math"
 	"strconv"
 	"strings"
+
+	"github.com/linkedin/goavro/v2"
 )
 
 type JsonValue struct {
@@ -15,6 +17,51 @@ type JsonValue struct {
 	Integer int32                `json:"__int32__,omitempty"`
 	Long    int64                `json:"__int64__,omitempty"`
 	Double  float64              `json:"__float64__,omitempty"`
+	Boolean bool                 `json:"__bool__,omitempty"`
+	Pointer bool                 `json:"__pointer__,omitempty"`
+}
+
+func (j *JsonValue) ToJsonMap() (map[string]interface{}, error) {
+	result := make(map[string]interface{})
+	if j.Type == "object" {
+		for key, value := range j.Object {
+			var item interface{}
+			if value.Type == "object" {
+				dados, err := value.ToJsonMap()
+				if err != nil {
+					return nil, err
+				}
+				item = dados
+			} else if value.Type == "array" {
+				var items []interface{}
+				item = items
+				for _, v := range value.Array {
+					dados, err := v.ToJsonMap()
+					if err != nil {
+						return nil, err
+					}
+					items = append(items, dados)
+				}
+			} else if value.Type == "string" {
+				item = value.Text
+			} else if value.Type == "double" {
+				item = value.Double
+			} else if value.Type == "integer" {
+				item = value.Integer
+			} else if value.Type == "long" {
+				item = value.Long
+			} else if value.Type == "bool" {
+				item = value.Boolean
+			} else {
+				continue
+			}
+			result[key] = item
+			if value.Pointer {
+				result[key] = goavro.Union(value.Type, item)
+			}
+		}
+	}
+	return result, nil
 }
 
 func (j *JsonValue) UnmarshalJSON(data []byte) error {
@@ -32,6 +79,9 @@ func (j *JsonValue) UnmarshalJSON(data []byte) error {
 			case "long":
 				j.Long = int64(dados["__int64__"].Integer)
 			}
+			if _, ok := dados["__pointer__"]; ok {
+				j.Pointer = true
+			}
 		} else {
 			j.Object = dados
 		}
@@ -44,6 +94,11 @@ func (j *JsonValue) UnmarshalJSON(data []byte) error {
 	} else if strings.Contains(dados, ".") {
 		j.Type = "double"
 		return json.Unmarshal(data, &j.Double)
+	} else if dados == "true" || dados == "false" {
+		j.Type = "bool"
+		j.Boolean = dados == "true"
+	} else if dados == "null" {
+		j.Type = "null"
 	} else {
 		longValue, err := strconv.ParseInt(dados, 10, 64)
 		if err != nil {

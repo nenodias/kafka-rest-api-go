@@ -1,7 +1,7 @@
 package kafka
 
 import (
-	"encoding/json"
+	"encoding/binary"
 	"fmt"
 	"strings"
 
@@ -9,7 +9,12 @@ import (
 	"github.com/confluentinc/confluent-kafka-go/v2/schemaregistry"
 
 	"github.com/hamba/avro/v2"
+	"github.com/linkedin/goavro/v2"
 	"github.com/nenodias/kafka-rest-api-go/app/core/domain"
+)
+
+const (
+	IS_GOAVRO = true
 )
 
 type AppKafkaProducer struct{}
@@ -48,7 +53,10 @@ func (k *AppKafkaProducer) PostOnTopic(input domain.PostRequest) error {
 	if err != nil {
 		fmt.Println("Error creating client")
 	}
-	k.Producer(producer, client, input)
+	err = k.Producer(producer, client, input)
+	if err != nil {
+		return err
+	}
 
 	producer.Flush(1000)
 	return nil
@@ -79,16 +87,20 @@ func (k *AppKafkaProducer) Producer(producer *kafka.Producer, client schemaregis
 				return err
 			}
 		} else {
-			key = []byte(record.Key)
+			key = []byte(record.Key.Text)
 		}
 		var payload []byte
 		if valueSchema.ID != 0 {
-			payload, err = k.Serialize(valueSchema, record.Value)
+			dados, err := record.Value.ToJsonMap()
+			if err != nil {
+				return err
+			}
+			payload, err = k.Serialize(valueSchema, dados)
 			if err != nil {
 				return err
 			}
 		} else {
-			payload = []byte(record.Value)
+			payload = []byte(record.Value.Text)
 		}
 
 		err := producer.Produce(&kafka.Message{
@@ -104,15 +116,31 @@ func (k *AppKafkaProducer) Producer(producer *kafka.Producer, client schemaregis
 	return nil
 }
 
-func (k *AppKafkaProducer) Serialize(ser schemaregistry.SchemaMetadata, rawText string) ([]byte, error) {
-	schema, err := avro.Parse(ser.Schema)
-	if err != nil {
-		return nil, err
+func (k *AppKafkaProducer) Serialize(ser schemaregistry.SchemaMetadata, rawText interface{}) ([]byte, error) {
+	if IS_GOAVRO {
+		codec, err := goavro.NewCodec(ser.Schema)
+		if err != nil {
+			return nil, err
+		}
+
+		// Convert native Go form to binary Avro data
+		binaryData, err := codec.BinaryFromNative(nil, rawText)
+		if err != nil {
+			return nil, err
+		}
+
+		magicByte := byte(0x0)
+		messageBytes := make([]byte, 5+len(binaryData))
+		messageBytes[0] = magicByte
+		schemaID := uint32(ser.ID)
+		binary.BigEndian.PutUint32(messageBytes[1:], schemaID)
+		messageBytes = append(messageBytes[0:5], binaryData...)
+		return messageBytes, nil
+	} else {
+		schema, err := avro.Parse(ser.Schema)
+		if err != nil {
+			return nil, err
+		}
+		return avro.Marshal(schema, rawText)
 	}
-	dado := make(map[string]interface{})
-	err = json.Unmarshal([]byte(rawText), &dado)
-	if err != nil {
-		return nil, err
-	}
-	return avro.Marshal(schema, rawText)
 }
